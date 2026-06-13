@@ -1,4 +1,4 @@
-# ====== 監視のテンポ（GitHub Actionsではcronで制御）======
+# ====== 監視のテンポ ======
 poll_interval_sec: 120
 jitter_sec: 60
 
@@ -7,8 +7,9 @@ ntfy_topic: ""
 discord_webhook_url: ""
 
 # ====== 「安い」と判定する基準 ======
-default_discount_pct: 15
+default_discount_pct: 20      # 相場よりこの%以上安いと通知（多すぎたら数字を上げる）
 reference_min_samples: 5
+strict_keyword: true          # 検索語の各単語がタイトルに全部含まれる出品だけ対象にする
 
 # ====== ノイズ除外（タイトルに含むと無視）======
 exclude_keywords:
@@ -32,13 +33,13 @@ exclude_keywords:
 # メルカリの状態IDで除外（5=傷あり, 6=状態が悪い）
 mercari_exclude_condition_ids: [5, 6]
 
-# ====== 監視対象（カード名は後で自由に書き換えてOK）======
+# ====== 監視対象 ======
 targets:
-  - name: "リザードンex SAR"
-    keyword: "リザードンex SAR"
-    price_max: 30000
-    discount_pct: 20
+  - name: "ゼイユ SAR"
+    keyword: "ゼイユ SAR"
 
-  - name: "ミモザ SAR"
-    keyword: "ミモザ SAR"
-    price_max: 60000
+  - name: "ルチアのアピール SAR"
+    keyword: "ルチアのアピール SAR"
+
+  - name: "メイのはげまし SAR"
+    keyword: "メイのはげまし SAR"
