@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import argparse
 import asyncio
-import json
 import os
 import random
 import statistics
@@ -17,7 +16,6 @@ from mercapi import Mercapi
 from mercapi.requests.search import SearchRequestData as MP
 
 BASE = Path(__file__).resolve().parent
-STATE_FILE = BASE / "seen.json"
 COND_NAMES = {1: "新品", 2: "未使用に近い", 3: "目立った傷なし",
               4: "やや傷あり", 5: "傷あり", 6: "状態が悪い"}
 
@@ -29,21 +27,6 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def save_state(state: dict) -> None:
-    cutoff = time.time() - 14 * 86400
-    pruned = {k: v for k, v in state.items() if v > cutoff}
-    STATE_FILE.write_text(json.dumps(pruned, ensure_ascii=False), encoding="utf-8")
-
-
 def trimmed_median(prices, trim_ratio=0.1):
     prices = sorted(p for p in prices if p and p > 0)
     if not prices:
@@ -52,6 +35,32 @@ def trimmed_median(prices, trim_ratio=0.1):
         k = int(len(prices) * trim_ratio)
         prices = prices[k: len(prices) - k] or prices
     return int(statistics.median(prices))
+
+
+def title_ok(title, cfg, target):
+    t = title or ""
+    excl = list(cfg.get("exclude_keywords", [])) + list(target.get("exclude_keywords") or [])
+    for kw in excl:
+        if kw and kw in t:
+            return False
+    req = []
+    if cfg.get("strict_keyword", True):
+        req += target["keyword"].split()
+    req += list(cfg.get("must_include", [])) + list(target.get("must_include") or [])
+    for kw in req:
+        if kw and kw not in t:
+            return False
+    return True
+
+
+def cond_excluded(cond_id, cfg):
+    return cond_id in (cfg.get("mercari_exclude_condition_ids") or [])
+
+
+def age_minutes(created):
+    if not created:
+        return 1e9
+    return (datetime.now() - created).total_seconds() / 60.0
 
 
 async def mercari_search(merc, keyword, status, price_max=None, limit=60):
@@ -65,40 +74,40 @@ async def mercari_search(merc, keyword, status, price_max=None, limit=60):
     return res.items[:limit]
 
 
-async def sold_prices(merc, keyword, price_max=None):
-    items = await mercari_search(merc, keyword, MP.Status.STATUS_SOLD_OUT, price_max)
-    return [it.real_price for it in items if it.real_price]
+async def sold_prices(merc, cfg, target, price_max=None):
+    items = await mercari_search(merc, target["keyword"], MP.Status.STATUS_SOLD_OUT, price_max)
+    out = []
+    for it in items:
+        if it.real_price is None:
+            continue
+        if not title_ok(it.name, cfg, target):
+            continue
+        if cond_excluded(it.item_condition_id, cfg):
+            continue
+        out.append(it.real_price)
+    return out
 
 
-async def live_listings(merc, keyword, price_max=None):
-    items = await mercari_search(merc, keyword, MP.Status.STATUS_ON_SALE, price_max)
+async def live_listings(merc, cfg, target, price_max=None):
+    items = await mercari_search(merc, target["keyword"], MP.Status.STATUS_ON_SALE, price_max)
     out = []
     for it in items:
         if it.real_price is None:
             continue
         out.append({
-            "id": it.id_,
             "title": it.name,
             "price": it.real_price,
             "url": f"https://jp.mercari.com/item/{it.id_}",
             "condition_id": it.item_condition_id,
+            "age_min": age_minutes(it.created),
         })
     return out
 
 
-def is_noise(title, cond_id, cfg, target):
-    t = title or ""
-    words = list(cfg.get("exclude_keywords", [])) + list(target.get("exclude_keywords") or [])
-    for kw in words:
-        if kw in t:
-            return f"除外語『{kw}』"
-    if cond_id in (cfg.get("mercari_exclude_condition_ids") or []):
-        return f"状態『{COND_NAMES.get(cond_id, cond_id)}』"
-    return None
-
-
 def evaluate(ls, reference, cfg, target):
-    if is_noise(ls["title"], ls["condition_id"], cfg, target):
+    if not title_ok(ls["title"], cfg, target):
+        return None
+    if cond_excluded(ls["condition_id"], cfg):
         return None
     if not reference:
         return None
@@ -118,13 +127,11 @@ def notify(ls, reference, pct):
     topic = os.environ.get("NTFY_TOPIC") or _cfg_notify.get("ntfy_topic")
     if topic:
         try:
-            httpx.post(
-                f"https://ntfy.sh/{topic}",
-                data=body.encode("utf-8"),
-                headers={"Title": f"Pokeca deal -{pct}%",
-                         "Click": ls["url"], "Tags": "fire"},
-                timeout=15,
-            )
+            httpx.post(f"https://ntfy.sh/{topic}",
+                       data=body.encode("utf-8"),
+                       headers={"Title": f"Pokeca deal -{pct}%",
+                                "Click": ls["url"], "Tags": "fire"},
+                       timeout=15)
         except Exception as e:
             print(f"  (ntfy通知失敗: {e})")
 
@@ -137,7 +144,8 @@ def notify(ls, reference, pct):
             print(f"  (Discord通知失敗: {e})")
 
 
-async def run_once(merc, cfg, state):
+async def run_once(merc, cfg):
+    recent = cfg.get("recent_minutes", 30)
     for target in cfg["targets"]:
         kw = target["keyword"]
         price_max = target.get("price_max")
@@ -145,32 +153,30 @@ async def run_once(merc, cfg, state):
         ref = target.get("reference_price")
         if not ref:
             try:
-                sold = await sold_prices(merc, kw, price_max)
+                sold = await sold_prices(merc, cfg, target, price_max)
             except Exception as e:
                 print(f"[{kw}] 売却取得エラー: {e}")
                 continue
             if len(sold) < cfg.get("reference_min_samples", 5):
-                print(f"[{kw}] 売却データ不足({len(sold)}件)→相場の手動指定推奨。スキップ")
+                print(f"[{kw}] 一致する売却データ不足({len(sold)}件)→相場の手動指定推奨。スキップ")
                 continue
             ref = trimmed_median(sold)
 
         thr = target.get("discount_pct") or cfg.get("default_discount_pct", 15)
-        print(f"[{kw}] 相場 ¥{ref:,}（{thr}%以上安いと通知）")
+        print(f"[{kw}] 相場 ¥{ref:,}（{thr}%以上安い & 直近{recent}分の出品を通知）")
 
         try:
-            live = await live_listings(merc, kw, price_max)
+            live = await live_listings(merc, cfg, target, price_max)
         except Exception as e:
             print(f"[{kw}] 出品取得エラー: {e}")
             continue
 
         for ls in live:
-            if ls["id"] in state:
+            if ls["age_min"] > recent:
                 continue
             pct = evaluate(ls, ref, cfg, target)
             if pct is not None:
                 notify(ls, ref, pct)
-            state[ls["id"]] = time.time()
-    save_state(state)
 
 
 async def main():
@@ -182,7 +188,6 @@ async def main():
     cfg = load_config(Path(args.config))
     global _cfg_notify
     _cfg_notify = cfg
-    state = load_state()
     merc = Mercapi()
 
     interval = cfg.get("poll_interval_sec", 120)
@@ -191,7 +196,7 @@ async def main():
     while True:
         print(f"\n──── 巡回 {datetime.now():%H:%M:%S} ────")
         try:
-            await run_once(merc, cfg, state)
+            await run_once(merc, cfg)
         except Exception as e:
             print(f"巡回エラー: {e}")
         if args.once:
