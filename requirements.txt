@@ -1,0 +1,3 @@
+mercapi
+httpx
+PyYAML
