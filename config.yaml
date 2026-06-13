@@ -1,0 +1,44 @@
+# ====== 監視のテンポ（GitHub Actionsではcronで制御）======
+poll_interval_sec: 120
+jitter_sec: 60
+
+# ====== 通知先（GitHub ActionsではSecretsを使うので空でOK）======
+ntfy_topic: ""
+discord_webhook_url: ""
+
+# ====== 「安い」と判定する基準 ======
+default_discount_pct: 15
+reference_min_samples: 5
+
+# ====== ノイズ除外（タイトルに含むと無視）======
+exclude_keywords:
+  - まとめ
+  - セット
+  - ロット
+  - ジャンク
+  - プレイ用
+  - 傷あり
+  - 折れ
+  - 海外版
+  - 中国版
+  - 韓国版
+  - 英語版
+  - 偽物
+  - コピー
+  - プロキシ
+  - 自作
+  - 同人
+
+# メルカリの状態IDで除外（5=傷あり, 6=状態が悪い）
+mercari_exclude_condition_ids: [5, 6]
+
+# ====== 監視対象（カード名は後で自由に書き換えてOK）======
+targets:
+  - name: "リザードンex SAR"
+    keyword: "リザードンex SAR"
+    price_max: 30000
+    discount_pct: 20
+
+  - name: "ミモザ SAR"
+    keyword: "ミモザ SAR"
+    price_max: 60000
